@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "vibebreak",
-      "source": ".",
+      "source": "./",
       "version": "0.1.0",
       "description": "Lock your Claude Code sessions every N tokens until you move. Phone counts reps and posts a BeReal-style snap to friends.",
       "homepage": "https://vibebreak.app",
