@@ -3,10 +3,29 @@
   "version": "0.1.1",
   "description": "Lock your Claude Code sessions every N tokens until you move. Phone counts reps and posts a BeReal-style snap to friends.",
   "author": "flipace <neschkudla@gmail.com>",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "homepage": "https://vibebreak.app",
-  "repository": "github:flipace/vibebreak-plugin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flipace/vibebreak-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/flipace/vibebreak-plugin/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "fitness",
+    "break",
+    "posture",
+    "streak",
+    "bereal",
+    "movement"
+  ],
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "vibebreak": "./dist/bin/vibebreak.js"
   },
@@ -19,6 +38,7 @@
   "scripts": {
     "dev": "tsx watch bin/vibebreak.ts",
     "build": "tsup",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest"
