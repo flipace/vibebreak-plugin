@@ -17,14 +17,19 @@ export interface PluginConfig {
   ingestPort?: number;
 }
 
-const DEFAULT_API = "http://localhost:3501";
-const DEFAULT_WS = "ws://localhost:3501";
+const DEFAULT_API = "https://api.vibebreak.app";
+const DEFAULT_WS = "wss://api.vibebreak.app";
 
-// Earlier builds defaulted to port 3001, which collides with other dev
-// services on most machines. We migrate any saved config that still
-// points there over to the new defaults so an upgrade "just works."
-const LEGACY_API = "http://localhost:3001";
-const LEGACY_WS = "ws://localhost:3001";
+// Earlier builds defaulted to localhost ports. Anyone upgrading past the
+// monorepo split should land on the production API without reconfiguring.
+const LEGACY_APIS = new Set([
+  "http://localhost:3001",
+  "http://localhost:3501",
+]);
+const LEGACY_WS_URLS = new Set([
+  "ws://localhost:3001",
+  "ws://localhost:3501",
+]);
 
 export function configDir(): string {
   return join(homedir(), ".vibebreak");
@@ -63,11 +68,11 @@ export async function load(): Promise<PluginConfig> {
     const parsed = JSON.parse(raw) as Partial<PluginConfig>;
     const cfg: PluginConfig = {
       apiBaseUrl:
-        !parsed.apiBaseUrl || parsed.apiBaseUrl === LEGACY_API
+        !parsed.apiBaseUrl || LEGACY_APIS.has(parsed.apiBaseUrl)
           ? base.apiBaseUrl
           : parsed.apiBaseUrl,
       wsBaseUrl:
-        !parsed.wsBaseUrl || parsed.wsBaseUrl === LEGACY_WS
+        !parsed.wsBaseUrl || LEGACY_WS_URLS.has(parsed.wsBaseUrl)
           ? base.wsBaseUrl
           : parsed.wsBaseUrl,
       deviceJwt: parsed.deviceJwt ?? null,
