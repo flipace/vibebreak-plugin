@@ -1,5 +1,7 @@
 node_modules/
-dist/
+# dist/ is committed — the Claude Code marketplace installs what's in
+# git, it doesn't run `npm run build` post-clone. Rebuild before every
+# version tag so `plugins/cache/.../dist/bin/vibebreak.js` stays fresh.
 *.tsbuildinfo
 .DS_Store
 .env
