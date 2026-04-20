@@ -358,6 +358,47 @@ init_esm_shims();
 init_config();
 import { promises as fs2 } from "node:fs";
 import path from "node:path";
+var TOTALS_LOCK = path.join(configDir(), "cc-session-totals.lock");
+var LOCK_WAIT_MS = 2e3;
+var STALE_LOCK_MS = 1e4;
+async function withTotalsLock(fn) {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  await fs2.mkdir(configDir(), { recursive: true, mode: 448 }).catch(() => void 0);
+  while (true) {
+    try {
+      const handle = await fs2.open(TOTALS_LOCK, "wx", 384);
+      try {
+        await handle.writeFile(`${process.pid}:${Date.now()}`);
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (err) {
+      const e = err;
+      if (e?.code !== "EEXIST") {
+        return await fn();
+      }
+      try {
+        const stat = await fs2.stat(TOTALS_LOCK);
+        if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+          await fs2.unlink(TOTALS_LOCK).catch(() => void 0);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        return await fn();
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await fs2.unlink(TOTALS_LOCK).catch(() => void 0);
+  }
+}
 var TOTALS_FILE = path.join(configDir(), "cc-session-totals.json");
 async function sumTranscript(transcriptPath) {
   let raw;
@@ -419,11 +460,14 @@ async function runCcHook() {
   if (!event.session_id || !event.transcript_path) return;
   const total = await sumTranscript(event.transcript_path);
   if (total <= 0) return;
-  const totals = await loadTotals();
-  const previous = totals[event.session_id] ?? 0;
-  const delta = total - previous;
-  totals[event.session_id] = total;
-  await saveTotals(totals);
+  const delta = await withTotalsLock(async () => {
+    const totals = await loadTotals();
+    const previous = totals[event.session_id] ?? 0;
+    const nextTotal = Math.max(previous, total);
+    totals[event.session_id] = nextTotal;
+    await saveTotals(totals);
+    return nextTotal - previous;
+  });
   if (delta <= 0) return;
   const { load: load2 } = await Promise.resolve().then(() => (init_config(), config_exports));
   const { runIngest: runIngest2 } = await Promise.resolve().then(() => (init_ingest(), ingest_exports));
@@ -730,7 +774,7 @@ Run ${kleur4.bold("vibebreak watch")} to start the meter.
 init_esm_shims();
 init_shared();
 import { promises as fs4, unlinkSync } from "node:fs";
-import { createServer } from "node:net";
+import { createConnection as createConnection2, createServer } from "node:net";
 import { platform as platform2 } from "node:os";
 import { createInterface } from "node:readline";
 import kleur6 from "kleur";
@@ -1044,6 +1088,42 @@ function ingest(rawLine, meter) {
   if (!Number.isFinite(n) || n <= 0) return;
   meter.add(n);
 }
+async function probeUnixSocket(sockPath, timeoutMs = 500) {
+  return await new Promise((resolve) => {
+    let settled = false;
+    const done = (alive) => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {
+      }
+      resolve(alive);
+    };
+    const sock = createConnection2({ path: sockPath });
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+    setTimeout(() => done(false), timeoutMs);
+  });
+}
+async function probeTcpPort(port, timeoutMs = 500) {
+  return await new Promise((resolve) => {
+    let settled = false;
+    const done = (alive) => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {
+      }
+      resolve(alive);
+    };
+    const sock = createConnection2({ host: "127.0.0.1", port });
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+    setTimeout(() => done(false), timeoutMs);
+  });
+}
 async function runWatch(cfg, opts = {}) {
   if (!isPaired(cfg) || !cfg.deviceJwt || !cfg.deviceId) {
     log.err("This device isn't paired yet. Run `vibebreak pair` first.");
@@ -1056,8 +1136,26 @@ async function runWatch(cfg, opts = {}) {
     log.err(`Could not initialize the local ingest secret: ${msg}`);
     return 1;
   }
-  const api = new Api(cfg.apiBaseUrl, cfg.deviceJwt);
-  const ws = connectWs(cfg.wsBaseUrl, cfg.deviceJwt);
+  const isWindows = platform2() === "win32";
+  if (!isWindows) {
+    const sockPath = socketPath();
+    if (await probeUnixSocket(sockPath)) {
+      log.info(
+        `Another vibebreak watcher is already running (socket ${kleur6.gray(sockPath)} is live). Exiting.`
+      );
+      return 0;
+    }
+  } else if (typeof cfg.ingestPort === "number" && cfg.ingestPort > 0) {
+    if (await probeTcpPort(cfg.ingestPort)) {
+      log.info(
+        `Another vibebreak watcher is already running (127.0.0.1:${cfg.ingestPort} is live). Exiting.`
+      );
+      return 0;
+    }
+  }
+  const deviceJwt = cfg.deviceJwt;
+  const api = new Api(cfg.apiBaseUrl, deviceJwt);
+  const ws = connectWs(cfg.wsBaseUrl, deviceJwt);
   let activeLock = null;
   let activeGateId = null;
   let exiting = false;
@@ -1126,7 +1224,6 @@ async function runWatch(cfg, opts = {}) {
     }
     ingest(line, meter);
   });
-  const isWindows = platform2() === "win32";
   const ingestServer = createServer((socket) => {
     const authorize = createSocketLineAuthorizer(cfg.ingestSecret ?? null);
     const sockRl = createInterface({ input: socket, terminal: false });
@@ -1190,34 +1287,62 @@ async function runWatch(cfg, opts = {}) {
     }
   } else {
     const sockPath = socketPath();
-    socketBindPath = sockPath;
     try {
       await fs4.mkdir(configDir(), { recursive: true, mode: 448 });
     } catch {
     }
-    try {
-      await fs4.unlink(sockPath);
-    } catch (err) {
-      const e = err;
-      if (e && e.code !== "ENOENT") {
-        log.warn(`Could not unlink stale socket ${sockPath}: ${e.message}`);
-      }
-    }
-    await new Promise((resolve, reject) => {
-      ingestServer.once("error", reject);
-      ingestServer.listen(sockPath, () => {
-        ingestServer.removeListener("error", reject);
+    const bindOnce = () => new Promise((resolve, reject) => {
+      const onError = (err) => {
+        ingestServer.removeListener("listening", onListen);
+        reject(err);
+      };
+      const onListen = () => {
+        ingestServer.removeListener("error", onError);
         resolve();
-      });
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`Could not bind ingest socket at ${sockPath}: ${msg}`);
+      };
+      ingestServer.once("error", onError);
+      ingestServer.once("listening", onListen);
+      ingestServer.listen(sockPath);
     });
     try {
-      await fs4.chmod(sockPath, 384);
-    } catch {
+      await bindOnce();
+      socketBindPath = sockPath;
+    } catch (err) {
+      const e = err;
+      if (e?.code === "EADDRINUSE" || e?.code === "EEXIST") {
+        if (await probeUnixSocket(sockPath)) {
+          log.info(
+            `Another vibebreak watcher bound ${kleur6.gray(sockPath)} while we were starting up. Exiting.`
+          );
+          try {
+            ws.close();
+          } catch {
+          }
+          meter.dispose();
+          return 0;
+        }
+        try {
+          await fs4.unlink(sockPath);
+        } catch {
+        }
+        try {
+          await bindOnce();
+          socketBindPath = sockPath;
+        } catch (err2) {
+          const e2 = err2;
+          log.warn(`Could not bind ingest socket at ${sockPath}: ${e2?.message ?? err2}`);
+        }
+      } else {
+        log.warn(`Could not bind ingest socket at ${sockPath}: ${e?.message ?? err}`);
+      }
     }
-    log.info(`Ingest socket listening at ${kleur6.gray(sockPath)}.`);
+    if (socketBindPath) {
+      try {
+        await fs4.chmod(sockPath, 384);
+      } catch {
+      }
+      log.info(`Ingest socket listening at ${kleur6.gray(sockPath)}.`);
+    }
   }
   log.info(`Watching. Threshold: ${kleur6.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);
   log.info(

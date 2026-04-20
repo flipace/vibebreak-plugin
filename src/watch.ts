@@ -1,5 +1,5 @@
 import { promises as fs, unlinkSync } from "node:fs";
-import { createServer, type Server, type Socket } from "node:net";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { platform } from "node:os";
 import { createInterface } from "node:readline";
 import kleur from "kleur";
@@ -50,6 +50,53 @@ export function ingest(rawLine: string, meter: TokenMeter): void {
   meter.add(n);
 }
 
+/**
+ * Probe whether a watcher is already listening on the given unix-domain socket.
+ * Used to keep the watcher a singleton per device — parallel CC SessionStart
+ * hooks would otherwise each spawn their own watcher and the second one would
+ * wipe the first off the socket, producing a zombie watcher with a dangling
+ * WS connection and duplicated heartbeats.
+ */
+async function probeUnixSocket(sockPath: string, timeoutMs = 500): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const done = (alive: boolean): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {
+        // ignore
+      }
+      resolve(alive);
+    };
+    const sock = createConnection({ path: sockPath });
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+    setTimeout(() => done(false), timeoutMs);
+  });
+}
+
+async function probeTcpPort(port: number, timeoutMs = 500): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const done = (alive: boolean): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {
+        // ignore
+      }
+      resolve(alive);
+    };
+    const sock = createConnection({ host: "127.0.0.1", port });
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+    setTimeout(() => done(false), timeoutMs);
+  });
+}
+
 export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Promise<number> {
   if (!isPaired(cfg) || !cfg.deviceJwt || !cfg.deviceId) {
     log.err("This device isn't paired yet. Run `vibebreak pair` first.");
@@ -63,8 +110,33 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
     return 1;
   }
 
-  const api = new Api(cfg.apiBaseUrl, cfg.deviceJwt);
-  const ws: WsClient = connectWs(cfg.wsBaseUrl, cfg.deviceJwt);
+  // Singleton check before we open any sockets. Parallel CC sessions each
+  // invoke SessionStart.sh which nohup-spawns `vibebreak watch`. Without this
+  // probe, watcher #2 would unlink watcher #1's socket and bind its own,
+  // leaving #1 as a zombie with a live WS connection and a dead socket.
+  const isWindows = platform() === "win32";
+  if (!isWindows) {
+    const sockPath = socketPath();
+    if (await probeUnixSocket(sockPath)) {
+      log.info(
+        `Another vibebreak watcher is already running (socket ${kleur.gray(sockPath)} is live). Exiting.`,
+      );
+      return 0;
+    }
+  } else if (typeof cfg.ingestPort === "number" && cfg.ingestPort > 0) {
+    if (await probeTcpPort(cfg.ingestPort)) {
+      log.info(
+        `Another vibebreak watcher is already running (127.0.0.1:${cfg.ingestPort} is live). Exiting.`,
+      );
+      return 0;
+    }
+  }
+
+  // Narrowed once at entry by the isPaired check above; async awaits below
+  // reassign `cfg` so TS loses the narrowing. Re-assert here.
+  const deviceJwt = cfg.deviceJwt as string;
+  const api = new Api(cfg.apiBaseUrl, deviceJwt);
+  const ws: WsClient = connectWs(cfg.wsBaseUrl, deviceJwt);
 
   let activeLock: LockHandle | null = null;
   let activeGateId: string | null = null;
@@ -155,7 +227,6 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
   // Source 2: local socket — Unix-domain on POSIX, TCP loopback on Windows.
   // CC PostToolUse hooks invoke `vibebreak ingest --tokens N` which writes
   // a single `tokens:N\n` line into this socket and disconnects.
-  const isWindows = platform() === "win32";
   const ingestServer: Server = createServer((socket: Socket) => {
     const authorize = createSocketLineAuthorizer(cfg.ingestSecret ?? null);
     const sockRl = createInterface({ input: socket, terminal: false });
@@ -229,39 +300,73 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
     }
   } else {
     const sockPath = socketPath();
-    socketBindPath = sockPath;
     // Make sure ~/.vibebreak exists (config save also does this lazily).
     try {
       await fs.mkdir(configDir(), { recursive: true, mode: 0o700 });
     } catch {
       // ignore — listen() will surface a real error below.
     }
-    // Clean up any stale socket file from a prior crashed watcher.
+    // Try to bind. If EADDRINUSE, re-probe: if the existing socket is live
+    // another watcher won the race and we should exit. If it's dead (stale
+    // file from a crashed process) unlink it and retry ONCE.
+    const bindOnce = (): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const onError = (err: NodeJS.ErrnoException): void => {
+          ingestServer.removeListener("listening", onListen);
+          reject(err);
+        };
+        const onListen = (): void => {
+          ingestServer.removeListener("error", onError);
+          resolve();
+        };
+        ingestServer.once("error", onError);
+        ingestServer.once("listening", onListen);
+        ingestServer.listen(sockPath);
+      });
     try {
-      await fs.unlink(sockPath);
+      await bindOnce();
+      socketBindPath = sockPath;
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
-      if (e && e.code !== "ENOENT") {
-        log.warn(`Could not unlink stale socket ${sockPath}: ${e.message}`);
+      if (e?.code === "EADDRINUSE" || e?.code === "EEXIST") {
+        if (await probeUnixSocket(sockPath)) {
+          log.info(
+            `Another vibebreak watcher bound ${kleur.gray(sockPath)} while we were starting up. Exiting.`,
+          );
+          try {
+            ws.close();
+          } catch {
+            // ignore
+          }
+          meter.dispose();
+          return 0;
+        }
+        // Socket file is stale. Unlink and retry.
+        try {
+          await fs.unlink(sockPath);
+        } catch {
+          // ignore
+        }
+        try {
+          await bindOnce();
+          socketBindPath = sockPath;
+        } catch (err2) {
+          const e2 = err2 as NodeJS.ErrnoException;
+          log.warn(`Could not bind ingest socket at ${sockPath}: ${e2?.message ?? err2}`);
+        }
+      } else {
+        log.warn(`Could not bind ingest socket at ${sockPath}: ${e?.message ?? err}`);
       }
     }
-    await new Promise<void>((resolve, reject) => {
-      ingestServer.once("error", reject);
-      ingestServer.listen(sockPath, () => {
-        ingestServer.removeListener("error", reject);
-        resolve();
-      });
-    }).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`Could not bind ingest socket at ${sockPath}: ${msg}`);
-    });
     // Lock the socket down so only this user can write to it.
-    try {
-      await fs.chmod(sockPath, 0o600);
-    } catch {
-      // ignore
+    if (socketBindPath) {
+      try {
+        await fs.chmod(sockPath, 0o600);
+      } catch {
+        // ignore
+      }
+      log.info(`Ingest socket listening at ${kleur.gray(sockPath)}.`);
     }
-    log.info(`Ingest socket listening at ${kleur.gray(sockPath)}.`);
   }
 
   log.info(`Watching. Threshold: ${kleur.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);

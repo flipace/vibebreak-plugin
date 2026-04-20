@@ -2,6 +2,64 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { configDir } from "./config.js";
 
+const TOTALS_LOCK = path.join(configDir(), "cc-session-totals.lock");
+const LOCK_WAIT_MS = 2_000;
+const STALE_LOCK_MS = 10_000;
+
+/**
+ * Simple cooperative file lock. Keeps parallel PostToolUse hooks (from
+ * multiple concurrent CC sessions) from racing on cc-session-totals.json.
+ *
+ * Protocol: create the lock file exclusively with the owning pid + mtime
+ * as the contents. Retry with small sleeps if the lock is held. If the
+ * lock is older than STALE_LOCK_MS, assume its owner crashed and steal it.
+ */
+async function withTotalsLock<T>(fn: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  await fs.mkdir(configDir(), { recursive: true, mode: 0o700 }).catch(() => undefined);
+
+  while (true) {
+    try {
+      const handle = await fs.open(TOTALS_LOCK, "wx", 0o600);
+      try {
+        await handle.writeFile(`${process.pid}:${Date.now()}`);
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e?.code !== "EEXIST") {
+        // Any other error → fall through and try work without a lock.
+        // The hook is best-effort; never fail the CC session on lock IO.
+        return await fn();
+      }
+      // Look for a stale lock from a crashed hook.
+      try {
+        const stat = await fs.stat(TOTALS_LOCK);
+        if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+          await fs.unlink(TOTALS_LOCK).catch(() => undefined);
+          continue;
+        }
+      } catch {
+        // lock vanished between open() and stat() — retry immediately
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        // Give up waiting and proceed without the lock. Better to risk a
+        // one-time race than to drop a hook entirely.
+        return await fn();
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await fs.unlink(TOTALS_LOCK).catch(() => undefined);
+  }
+}
+
 interface PostToolUseEvent {
   hook_event_name?: string;
   session_id?: string;
@@ -113,11 +171,21 @@ export async function runCcHook(): Promise<void> {
   const total = await sumTranscript(event.transcript_path);
   if (total <= 0) return;
 
-  const totals = await loadTotals();
-  const previous = totals[event.session_id] ?? 0;
-  const delta = total - previous;
-  totals[event.session_id] = total;
-  await saveTotals(totals);
+  // Serialize read→mutate→write so parallel CC sessions don't clobber each
+  // other's session entries. Without this, the losing write sees prev=0 on
+  // its next run and forwards the full session sum, double-counting and
+  // potentially firing a gate too early.
+  const delta = await withTotalsLock(async () => {
+    const totals = await loadTotals();
+    const previous = totals[event.session_id as string] ?? 0;
+    // Guard against transcript resets (tool rotation, log trims). We only
+    // advance the high-water mark, never rewind — a non-monotonic drop
+    // would otherwise emit a phantom huge delta on the next real increase.
+    const nextTotal = Math.max(previous, total);
+    totals[event.session_id as string] = nextTotal;
+    await saveTotals(totals);
+    return nextTotal - previous;
+  });
 
   if (delta <= 0) return;
 
