@@ -879,6 +879,7 @@ var MAX_BACKOFF_MS = 3e4;
 function buildWsRequest(baseUrl, deviceJwt) {
   const url = new URL(baseUrl);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/v1/ws`;
+  url.searchParams.set("token", deviceJwt);
   return {
     url: url.toString(),
     headers: {

@@ -31,6 +31,12 @@ export function buildWsRequest(
 ): { url: string; headers: Record<string, string> } {
   const url = new URL(baseUrl);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/v1/ws`;
+  // The API's ws/server.ts authenticates by reading `?token=` from the
+  // upgrade URL. Header-based auth works server-to-server but gets
+  // stripped by many WS clients and, critically, isn't what the server
+  // checks. Send both — query string for actual auth, header for any
+  // proxy that logs WS upgrades by URL only.
+  url.searchParams.set("token", deviceJwt);
   return {
     url: url.toString(),
     headers: {
