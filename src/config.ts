@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,6 +16,11 @@ export interface PluginConfig {
    * Omitted entirely on non-Windows platforms (where the Unix-domain socket is used).
    */
   ingestPort?: number;
+  /**
+   * Shared secret used by the local ingest protocol so only this installation's
+   * hooks can feed token deltas into the watcher.
+   */
+  ingestSecret?: string;
 }
 
 const DEFAULT_API = "https://api.vibebreak.app";
@@ -90,6 +96,9 @@ export async function load(): Promise<PluginConfig> {
     ) {
       cfg.ingestPort = parsed.ingestPort;
     }
+    if (typeof parsed.ingestSecret === "string" && parsed.ingestSecret.length > 0) {
+      cfg.ingestSecret = parsed.ingestSecret;
+    }
     return cfg;
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
@@ -124,6 +133,33 @@ export async function clearJwt(): Promise<PluginConfig> {
   const cleared: PluginConfig = { ...cfg, deviceJwt: null, deviceId: null };
   await save(cleared);
   return cleared;
+}
+
+function generateIngestSecret(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+export async function ensureIngestSecret(cfg: PluginConfig): Promise<PluginConfig> {
+  if (typeof cfg.ingestSecret === "string" && cfg.ingestSecret.length > 0) {
+    return cfg;
+  }
+  const next: PluginConfig = {
+    ...cfg,
+    ingestSecret: generateIngestSecret(),
+  };
+  await save(next);
+  return next;
+}
+
+export function redactConfig(cfg: PluginConfig): PluginConfig {
+  const redacted: PluginConfig = {
+    ...cfg,
+    deviceJwt: cfg.deviceJwt ? "[redacted]" : null,
+  };
+  if (cfg.ingestSecret) {
+    redacted.ingestSecret = "[redacted]";
+  }
+  return redacted;
 }
 
 /** Make sure config exists on disk; useful for `vibebreak config` first-run. */

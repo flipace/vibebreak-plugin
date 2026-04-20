@@ -1,6 +1,6 @@
 {
   "name": "vibebreak",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "description": "Lock your AI sessions every N tokens until you move. Phone counts reps and posts a BeReal-style snap to your friends.",
   "homepage": "https://vibebreak.app",
   "repository": "https://github.com/flipace/vibebreak",
@@ -9,5 +9,12 @@
     "name": "flipace",
     "email": "neschkudla@gmail.com"
   },
-  "keywords": ["fitness", "break", "posture", "streak", "bereal", "movement"]
+  "keywords": [
+    "fitness",
+    "break",
+    "posture",
+    "streak",
+    "bereal",
+    "movement"
+  ]
 }

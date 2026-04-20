@@ -1,7 +1,7 @@
 import kleur from "kleur";
 import { runCcHook } from "../src/cc-hook.js";
 import { runCheckGate } from "../src/check-gate.js";
-import { clearJwt, configPath, isPaired, load } from "../src/config.js";
+import { clearJwt, configPath, isPaired, load, redactConfig } from "../src/config.js";
 import { runIngest } from "../src/ingest.js";
 import { log } from "../src/log.js";
 import { runPair } from "../src/pair.js";
@@ -27,8 +27,8 @@ ${kleur.bold("Usage:")}
   vibebreak help                  Show this message.
 
 ${kleur.bold("Environment:")}
-  VIBEBREAK_API                   Override API base URL (default http://localhost:3001).
-  VIBEBREAK_WS                    Override WS base URL  (default ws://localhost:3001).
+  VIBEBREAK_API                   Override API base URL (default https://api.vibebreak.app).
+  VIBEBREAK_WS                    Override WS base URL  (default wss://api.vibebreak.app).
 
 ${kleur.bold("Token sources for `watch`:")}
   1. Stdin lines like \`tokens:1234\` (manual / V1 fallback).
@@ -126,7 +126,7 @@ async function main(): Promise<number> {
   if (explicit === "config") {
     log.banner();
     process.stdout.write(`${kleur.gray(`# ${configPath()}`)}\n`);
-    process.stdout.write(`${JSON.stringify(cfg, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(redactConfig(cfg), null, 2)}\n`);
     return 0;
   }
 

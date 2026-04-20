@@ -10,10 +10,8 @@
 
 PLUGIN_BIN="${CLAUDE_PLUGIN_ROOT}/dist/bin/vibebreak.js"
 
-if [ -f "$PLUGIN_BIN" ]; then
+if [ -f "$PLUGIN_BIN" ] && command -v node >/dev/null 2>&1; then
   node "$PLUGIN_BIN" cc-hook >/dev/null 2>&1 || true
-elif command -v vibebreak >/dev/null 2>&1; then
-  vibebreak cc-hook >/dev/null 2>&1 || true
 fi
 
 exit 0

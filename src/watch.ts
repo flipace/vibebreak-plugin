@@ -6,7 +6,8 @@ import kleur from "kleur";
 import { EXERCISE_DEFAULT_TARGET, type ExerciseKind, type GateResponse } from "./shared.js";
 import { clearActiveGate, saveActiveGate } from "./active-gate.js";
 import { Api, ApiError } from "./api.js";
-import { configDir, isPaired, save, socketPath, type PluginConfig } from "./config.js";
+import { configDir, ensureIngestSecret, isPaired, save, socketPath, type PluginConfig } from "./config.js";
+import { createSocketLineAuthorizer } from "./ingest-protocol.js";
 import { log } from "./log.js";
 import { startLock, restoreCursor, type LockHandle } from "./lock.js";
 import { TokenMeter } from "./meter.js";
@@ -52,6 +53,13 @@ export function ingest(rawLine: string, meter: TokenMeter): void {
 export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Promise<number> {
   if (!isPaired(cfg) || !cfg.deviceJwt || !cfg.deviceId) {
     log.err("This device isn't paired yet. Run `vibebreak pair` first.");
+    return 1;
+  }
+  try {
+    cfg = await ensureIngestSecret(cfg);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.err(`Could not initialize the local ingest secret: ${msg}`);
     return 1;
   }
 
@@ -149,9 +157,27 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
   // a single `tokens:N\n` line into this socket and disconnects.
   const isWindows = platform() === "win32";
   const ingestServer: Server = createServer((socket: Socket) => {
+    const authorize = createSocketLineAuthorizer(cfg.ingestSecret ?? null);
     const sockRl = createInterface({ input: socket, terminal: false });
     sockRl.on("line", (raw) => {
-      ingest(raw, meter);
+      const result = authorize(raw);
+      if (result.type === "data") {
+        ingest(result.line, meter);
+        return;
+      }
+      if (result.type === "reject") {
+        log.warn("Rejected unauthenticated local ingest client.");
+        try {
+          sockRl.close();
+        } catch {
+          // ignore
+        }
+        try {
+          socket.destroy();
+        } catch {
+          // ignore
+        }
+      }
     });
     sockRl.on("close", () => {
       try {

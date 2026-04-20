@@ -2,6 +2,7 @@ import { createConnection, type NetConnectOpts } from "node:net";
 import { platform } from "node:os";
 import kleur from "kleur";
 import { socketPath, type PluginConfig } from "./config.js";
+import { createIngestPayload } from "./ingest-protocol.js";
 
 /**
  * Send a single `tokens:N\n` line to the running `vibebreak watch` process.
@@ -58,7 +59,8 @@ export async function runIngest(cfg: PluginConfig, tokens: number): Promise<numb
     });
 
     sock.once("connect", () => {
-      sock.write(`tokens:${tokens}\n`, () => {
+      const payload = createIngestPayload(tokens, cfg.ingestSecret ?? null);
+      sock.write(payload, () => {
         sock.end();
       });
     });

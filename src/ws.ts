@@ -25,14 +25,22 @@ export interface WsClient {
   readonly closed: boolean;
 }
 
-function buildUrl(baseUrl: string, deviceJwt: string): string {
-  const trimmed = baseUrl.replace(/\/+$/, "");
-  const sep = trimmed.includes("?") ? "&" : "?";
-  return `${trimmed}/v1/ws${sep}token=${encodeURIComponent(deviceJwt)}`;
+export function buildWsRequest(
+  baseUrl: string,
+  deviceJwt: string,
+): { url: string; headers: Record<string, string> } {
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/v1/ws`;
+  return {
+    url: url.toString(),
+    headers: {
+      authorization: `Bearer ${deviceJwt}`,
+    },
+  };
 }
 
 export function connectWs(baseUrl: string, deviceJwt: string): WsClient {
-  const url = buildUrl(baseUrl, deviceJwt);
+  const request = buildWsRequest(baseUrl, deviceJwt);
   const listeners: { [E in keyof WsEventMap]: Set<Listener<E>> } = {
     open: new Set(),
     close: new Set(),
@@ -76,7 +84,7 @@ export function connectWs(baseUrl: string, deviceJwt: string): WsClient {
     if (closedByUser) return;
     let socket: WebSocket;
     try {
-      socket = new WebSocket(url);
+      socket = new WebSocket(request.url, { headers: request.headers });
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       emit("error", e);

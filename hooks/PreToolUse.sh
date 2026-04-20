@@ -7,11 +7,8 @@
 
 PLUGIN_BIN="${CLAUDE_PLUGIN_ROOT}/dist/bin/vibebreak.js"
 
-if [ -f "$PLUGIN_BIN" ]; then
+if [ -f "$PLUGIN_BIN" ] && command -v node >/dev/null 2>&1; then
   node "$PLUGIN_BIN" check-gate
-  exit $?
-elif command -v vibebreak >/dev/null 2>&1; then
-  vibebreak check-gate
   exit $?
 fi
 
