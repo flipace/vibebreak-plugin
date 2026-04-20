@@ -19,7 +19,7 @@ fi
 
 # Already paired → boot the watcher detached. Stdout/stderr go to a
 # rotating log so the CC terminal stays clean. Only one watcher ever:
-# the ingest socket is exclusive, so a second launch immediately exits.
+# startup now grabs a lock file before it mutates config or opens sockets.
 LOG="${HOME}/.vibebreak/watch.log"
 mkdir -p "${HOME}/.vibebreak"
 nohup node "$PLUGIN_BIN" watch >>"$LOG" 2>&1 &

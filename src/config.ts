@@ -53,6 +53,10 @@ export function socketPath(): string {
   return join(configDir(), "sock");
 }
 
+export function watcherLockPath(): string {
+  return join(configDir(), "watch.lock");
+}
+
 export function defaults(): PluginConfig {
   return {
     apiBaseUrl: process.env["VIBEBREAK_API"] ?? DEFAULT_API,

@@ -108,7 +108,8 @@ __export(config_exports, {
   load: () => load,
   redactConfig: () => redactConfig,
   save: () => save,
-  socketPath: () => socketPath
+  socketPath: () => socketPath,
+  watcherLockPath: () => watcherLockPath
 });
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -122,6 +123,9 @@ function configPath() {
 }
 function socketPath() {
   return join(configDir(), "sock");
+}
+function watcherLockPath() {
+  return join(configDir(), "watch.lock");
 }
 function defaults() {
   return {
@@ -606,8 +610,8 @@ var Api = class {
   setDeviceJwt(jwt) {
     this.deviceJwt = jwt;
   }
-  async request(path3, schema, init = {}) {
-    const url = `${this.baseUrl}${path3}`;
+  async request(path4, schema, init = {}) {
+    const url = `${this.baseUrl}${path4}`;
     const headers = new Headers(init.headers);
     if (!headers.has("content-type") && init.body !== void 0 && init.body !== null) {
       headers.set("content-type", "application/json");
@@ -624,16 +628,16 @@ var Api = class {
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new ApiError(res.status, text, `${res.status} ${res.statusText} from ${path3}`);
+      throw new ApiError(res.status, text, `${res.status} ${res.statusText} from ${path4}`);
     }
     if (text.length === 0) {
-      throw new ApiError(res.status, "", `Empty response from ${path3}`);
+      throw new ApiError(res.status, "", `Empty response from ${path4}`);
     }
     let parsed;
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new ApiError(res.status, text, `Invalid JSON from ${path3}`);
+      throw new ApiError(res.status, text, `Invalid JSON from ${path4}`);
     }
     const result = schema.safeParse(parsed);
     if (!result.success) {
@@ -773,7 +777,7 @@ Run ${kleur4.bold("vibebreak watch")} to start the meter.
 // src/watch.ts
 init_esm_shims();
 init_shared();
-import { promises as fs4, unlinkSync } from "node:fs";
+import { promises as fs5, unlinkSync as unlinkSync2 } from "node:fs";
 import { createConnection as createConnection2, createServer } from "node:net";
 import { platform as platform2 } from "node:os";
 import { createInterface } from "node:readline";
@@ -913,6 +917,143 @@ var TokenMeter = class {
     this.disposed = true;
   }
 };
+
+// src/watcher-lock.ts
+init_esm_shims();
+import { randomUUID } from "node:crypto";
+import { promises as fs4, readFileSync, unlinkSync } from "node:fs";
+import path3 from "node:path";
+var LOCK_PUBLISH_GRACE_MS = 500;
+var LOCK_RETRY_DELAY_MS = 25;
+function defaultIsProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const e = err;
+    return e.code !== "ESRCH";
+  }
+}
+function parseLockState(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid === "number" && Number.isInteger(parsed.pid) && parsed.pid > 0 && typeof parsed.acquiredAt === "number" && Number.isFinite(parsed.acquiredAt) && typeof parsed.token === "string" && parsed.token.length > 0) {
+      return parsed;
+    }
+  } catch {
+  }
+  return null;
+}
+async function unlinkIfOwned(lockPath, expectedContents) {
+  let raw;
+  try {
+    raw = await fs4.readFile(lockPath, "utf8");
+  } catch (err) {
+    const e = err;
+    if (e.code === "ENOENT") return;
+    throw err;
+  }
+  if (raw !== expectedContents) return;
+  try {
+    await fs4.unlink(lockPath);
+  } catch (err) {
+    const e = err;
+    if (e.code !== "ENOENT") throw err;
+  }
+}
+function unlinkIfOwnedSync(lockPath, expectedContents) {
+  let raw;
+  try {
+    raw = readFileSync(lockPath, "utf8");
+  } catch (err) {
+    const e = err;
+    if (e.code === "ENOENT") return;
+    throw err;
+  }
+  if (raw !== expectedContents) return;
+  try {
+    unlinkSync(lockPath);
+  } catch (err) {
+    const e = err;
+    if (e.code !== "ENOENT") throw err;
+  }
+}
+async function resolveExistingLock(lockPath, isProcessAlive, publishGraceMs, sleep2) {
+  let raw;
+  try {
+    raw = await fs4.readFile(lockPath, "utf8");
+  } catch (err) {
+    const e = err;
+    if (e.code === "ENOENT") return "retry";
+    throw err;
+  }
+  const parsed = parseLockState(raw);
+  if (parsed && isProcessAlive(parsed.pid)) {
+    return "locked";
+  }
+  if (!parsed) {
+    try {
+      const stat = await fs4.stat(lockPath);
+      if (Date.now() - stat.mtimeMs < publishGraceMs) {
+        await sleep2(LOCK_RETRY_DELAY_MS);
+        return "retry";
+      }
+    } catch (err) {
+      const e = err;
+      if (e.code === "ENOENT") return "retry";
+      throw err;
+    }
+  }
+  try {
+    await fs4.unlink(lockPath);
+  } catch (err) {
+    const e = err;
+    if (e.code !== "ENOENT") throw err;
+  }
+  return "retry";
+}
+async function acquireWatcherLock(opts) {
+  await fs4.mkdir(path3.dirname(opts.lockPath), { recursive: true, mode: 448 });
+  const isProcessAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
+  const publishGraceMs = opts.publishGraceMs ?? LOCK_PUBLISH_GRACE_MS;
+  const sleep2 = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const contents = JSON.stringify({
+    pid: process.pid,
+    acquiredAt: Date.now(),
+    token: randomUUID()
+  });
+  while (true) {
+    try {
+      const handle = await fs4.open(opts.lockPath, "wx", 384);
+      try {
+        await handle.writeFile(contents);
+      } finally {
+        await handle.close();
+      }
+      return {
+        path: opts.lockPath,
+        async release() {
+          await unlinkIfOwned(opts.lockPath, contents);
+        },
+        releaseSync() {
+          unlinkIfOwnedSync(opts.lockPath, contents);
+        }
+      };
+    } catch (err) {
+      const e = err;
+      if (e.code !== "EEXIST") throw err;
+      const status = await resolveExistingLock(
+        opts.lockPath,
+        isProcessAlive,
+        publishGraceMs,
+        sleep2
+      );
+      if (status === "locked") {
+        return null;
+      }
+    }
+  }
+}
 
 // src/ws.ts
 init_esm_shims();
@@ -1129,326 +1270,349 @@ async function runWatch(cfg, opts = {}) {
     log.err("This device isn't paired yet. Run `vibebreak pair` first.");
     return 1;
   }
-  try {
-    cfg = await ensureIngestSecret(cfg);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log.err(`Could not initialize the local ingest secret: ${msg}`);
-    return 1;
+  const watchLock = await acquireWatcherLock({ lockPath: watcherLockPath() });
+  if (!watchLock) {
+    log.info("Another vibebreak watcher is already starting or running. Exiting.");
+    return 0;
   }
-  const isWindows = platform2() === "win32";
-  if (!isWindows) {
-    const sockPath = socketPath();
-    if (await probeUnixSocket(sockPath)) {
-      log.info(
-        `Another vibebreak watcher is already running (socket ${kleur6.gray(sockPath)} is live). Exiting.`
-      );
-      return 0;
-    }
-  } else if (typeof cfg.ingestPort === "number" && cfg.ingestPort > 0) {
-    if (await probeTcpPort(cfg.ingestPort)) {
-      log.info(
-        `Another vibebreak watcher is already running (127.0.0.1:${cfg.ingestPort} is live). Exiting.`
-      );
-      return 0;
-    }
-  }
-  const deviceJwt = cfg.deviceJwt;
-  const api = new Api(cfg.apiBaseUrl, deviceJwt);
-  const ws = connectWs(cfg.wsBaseUrl, deviceJwt);
-  let activeLock = null;
-  let activeGateId = null;
-  let exiting = false;
-  const meter = new TokenMeter({
-    threshold: cfg.thresholdTokens,
-    onTrigger: () => {
-      void fireGate();
-    }
-  });
-  async function fireGate() {
-    if (activeLock) return;
-    log.info(
-      `Token threshold hit (${meter.total.toLocaleString()}/${cfg.thresholdTokens.toLocaleString()}). Creating gate...`
-    );
-    let gate;
+  const releaseWatchLock = () => {
     try {
-      gate = await api.createGate({ thresholdTokens: cfg.thresholdTokens });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.err(`Failed to create gate: ${msg}`);
-      if (err instanceof ApiError && err.status === 0) {
-        log.warn(`Is the API reachable at ${cfg.apiBaseUrl}? Set VIBEBREAK_API to override.`);
-      }
-      meter.reset();
-      return;
-    }
-    activeGateId = gate.id;
-    activeLock = startLock({
-      exerciseLabel: humanExercise(gate),
-      thresholdTokens: cfg.thresholdTokens,
-      gateId: gate.id
-    });
-    try {
-      await saveActiveGate({
-        gateId: gate.id,
-        exerciseLabel: humanExercise(gate),
-        triggeredAt: gate.triggeredAt
-      });
+      watchLock.releaseSync();
     } catch {
     }
-    meter.reset();
-  }
-  ws.on("hello", (deviceId) => {
-    log.info(`WS hello (deviceId=${deviceId}).`);
-  });
-  ws.on("unlock", (gateId) => {
-    if (activeLock && (activeGateId === gateId || activeGateId === null)) {
-      activeLock.release({ message: kleur6.green("Nice. Streak preserved.") });
-      activeLock = null;
-      activeGateId = null;
-      meter.reset();
-      void clearActiveGate().catch(() => void 0);
-    } else {
-      log.warn(`Got unlock for gate ${gateId} but no matching active lock; ignoring.`);
-    }
-  });
-  ws.on("error", () => {
-  });
-  const input = opts.input ?? process.stdin;
-  const rl = createInterface({ input, terminal: false });
-  rl.on("line", (raw) => {
-    const line = raw.trim();
-    if (line === "quit" || line === "exit") {
-      shutdown(0);
-      return;
-    }
-    ingest(line, meter);
-  });
-  const ingestServer = createServer((socket) => {
-    const authorize = createSocketLineAuthorizer(cfg.ingestSecret ?? null);
-    const sockRl = createInterface({ input: socket, terminal: false });
-    sockRl.on("line", (raw) => {
-      const result = authorize(raw);
-      if (result.type === "data") {
-        ingest(result.line, meter);
-        return;
+  };
+  const releaseWatchLockOnExit = () => {
+    releaseWatchLock();
+  };
+  process.once("exit", releaseWatchLockOnExit);
+  try {
+    let shutdown2 = function(code) {
+      if (exiting) return;
+      exiting = true;
+      log.info("Shutting down...");
+      try {
+        clearInterval(heartbeat);
+      } catch {
       }
-      if (result.type === "reject") {
-        log.warn("Rejected unauthenticated local ingest client.");
+      try {
+        rl.close();
+      } catch {
+      }
+      try {
+        ingestServer.close();
+      } catch {
+      }
+      if (socketBindPath) {
         try {
-          sockRl.close();
+          unlinkSync2(socketBindPath);
         } catch {
         }
+      }
+      try {
+        ws.close();
+      } catch {
+      }
+      if (activeLock) {
+        activeLock.release({ message: "Aborted by user." });
+        activeLock = null;
+      }
+      meter.dispose();
+      restoreCursor();
+      releaseWatchLock();
+      setTimeout(() => process.exit(code), 50);
+    };
+    var shutdown = shutdown2;
+    const isWindows = platform2() === "win32";
+    if (!isWindows) {
+      const sockPath = socketPath();
+      if (await probeUnixSocket(sockPath)) {
+        log.info(
+          `Another vibebreak watcher is already running (socket ${kleur6.gray(sockPath)} is live). Exiting.`
+        );
+        return 0;
+      }
+    } else if (typeof cfg.ingestPort === "number" && cfg.ingestPort > 0) {
+      if (await probeTcpPort(cfg.ingestPort)) {
+        log.info(
+          `Another vibebreak watcher is already running (127.0.0.1:${cfg.ingestPort} is live). Exiting.`
+        );
+        return 0;
+      }
+    }
+    try {
+      cfg = await ensureIngestSecret(cfg);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.err(`Could not initialize the local ingest secret: ${msg}`);
+      return 1;
+    }
+    const deviceJwt = cfg.deviceJwt;
+    const api = new Api(cfg.apiBaseUrl, deviceJwt);
+    const ws = connectWs(cfg.wsBaseUrl, deviceJwt);
+    let activeLock = null;
+    let activeGateId = null;
+    let exiting = false;
+    const meter = new TokenMeter({
+      threshold: cfg.thresholdTokens,
+      onTrigger: () => {
+        void fireGate();
+      }
+    });
+    async function fireGate() {
+      if (activeLock) return;
+      log.info(
+        `Token threshold hit (${meter.total.toLocaleString()}/${cfg.thresholdTokens.toLocaleString()}). Creating gate...`
+      );
+      let gate;
+      try {
+        gate = await api.createGate({ thresholdTokens: cfg.thresholdTokens });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.err(`Failed to create gate: ${msg}`);
+        if (err instanceof ApiError && err.status === 0) {
+          log.warn(`Is the API reachable at ${cfg.apiBaseUrl}? Set VIBEBREAK_API to override.`);
+        }
+        meter.reset();
+        return;
+      }
+      activeGateId = gate.id;
+      activeLock = startLock({
+        exerciseLabel: humanExercise(gate),
+        thresholdTokens: cfg.thresholdTokens,
+        gateId: gate.id
+      });
+      try {
+        await saveActiveGate({
+          gateId: gate.id,
+          exerciseLabel: humanExercise(gate),
+          triggeredAt: gate.triggeredAt
+        });
+      } catch {
+      }
+      meter.reset();
+    }
+    ws.on("hello", (deviceId) => {
+      log.info(`WS hello (deviceId=${deviceId}).`);
+    });
+    ws.on("unlock", (gateId) => {
+      if (activeLock && (activeGateId === gateId || activeGateId === null)) {
+        activeLock.release({ message: kleur6.green("Nice. Streak preserved.") });
+        activeLock = null;
+        activeGateId = null;
+        meter.reset();
+        void clearActiveGate().catch(() => void 0);
+      } else {
+        log.warn(`Got unlock for gate ${gateId} but no matching active lock; ignoring.`);
+      }
+    });
+    ws.on("error", () => {
+    });
+    const input = opts.input ?? process.stdin;
+    const rl = createInterface({ input, terminal: false });
+    rl.on("line", (raw) => {
+      const line = raw.trim();
+      if (line === "quit" || line === "exit") {
+        shutdown2(0);
+        return;
+      }
+      ingest(line, meter);
+    });
+    const ingestServer = createServer((socket) => {
+      const authorize = createSocketLineAuthorizer(cfg.ingestSecret ?? null);
+      const sockRl = createInterface({ input: socket, terminal: false });
+      sockRl.on("line", (raw) => {
+        const result = authorize(raw);
+        if (result.type === "data") {
+          ingest(result.line, meter);
+          return;
+        }
+        if (result.type === "reject") {
+          log.warn("Rejected unauthenticated local ingest client.");
+          try {
+            sockRl.close();
+          } catch {
+          }
+          try {
+            socket.destroy();
+          } catch {
+          }
+        }
+      });
+      sockRl.on("close", () => {
         try {
           socket.destroy();
         } catch {
         }
-      }
+      });
+      socket.on("error", () => {
+      });
     });
-    sockRl.on("close", () => {
+    ingestServer.on("error", (err) => {
+      log.warn(`Ingest socket server error: ${err.message}`);
+    });
+    let socketBindPath = null;
+    let boundIngestPort = null;
+    if (isWindows) {
+      const desiredPort = typeof cfg.ingestPort === "number" ? cfg.ingestPort : 0;
+      await new Promise((resolve, reject) => {
+        ingestServer.once("error", reject);
+        ingestServer.listen(desiredPort, "127.0.0.1", () => {
+          ingestServer.removeListener("error", reject);
+          resolve();
+        });
+      }).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn(`Could not bind ingest TCP server: ${msg}`);
+      });
+      const addr = ingestServer.address();
+      if (addr && typeof addr === "object" && typeof addr.port === "number") {
+        boundIngestPort = addr.port;
+        if (cfg.ingestPort !== boundIngestPort) {
+          const next = { ...cfg, ingestPort: boundIngestPort };
+          try {
+            await save(next);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn(`Could not persist ingestPort to config: ${msg}`);
+          }
+        }
+        log.info(`Ingest TCP server listening on 127.0.0.1:${boundIngestPort}.`);
+      }
+    } else {
+      const sockPath = socketPath();
       try {
-        socket.destroy();
+        await fs5.mkdir(configDir(), { recursive: true, mode: 448 });
       } catch {
       }
-    });
-    socket.on("error", () => {
-    });
-  });
-  ingestServer.on("error", (err) => {
-    log.warn(`Ingest socket server error: ${err.message}`);
-  });
-  let socketBindPath = null;
-  let boundIngestPort = null;
-  if (isWindows) {
-    const desiredPort = typeof cfg.ingestPort === "number" ? cfg.ingestPort : 0;
-    await new Promise((resolve, reject) => {
-      ingestServer.once("error", reject);
-      ingestServer.listen(desiredPort, "127.0.0.1", () => {
-        ingestServer.removeListener("error", reject);
-        resolve();
+      const bindOnce = () => new Promise((resolve, reject) => {
+        const onError = (err) => {
+          ingestServer.removeListener("listening", onListen);
+          reject(err);
+        };
+        const onListen = () => {
+          ingestServer.removeListener("error", onError);
+          resolve();
+        };
+        ingestServer.once("error", onError);
+        ingestServer.once("listening", onListen);
+        ingestServer.listen(sockPath);
       });
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`Could not bind ingest TCP server: ${msg}`);
-    });
-    const addr = ingestServer.address();
-    if (addr && typeof addr === "object" && typeof addr.port === "number") {
-      boundIngestPort = addr.port;
-      if (cfg.ingestPort !== boundIngestPort) {
-        const next = { ...cfg, ingestPort: boundIngestPort };
-        try {
-          await save(next);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.warn(`Could not persist ingestPort to config: ${msg}`);
+      try {
+        await bindOnce();
+        socketBindPath = sockPath;
+      } catch (err) {
+        const e = err;
+        if (e?.code === "EADDRINUSE" || e?.code === "EEXIST") {
+          if (await probeUnixSocket(sockPath)) {
+            log.info(
+              `Another vibebreak watcher bound ${kleur6.gray(sockPath)} while we were starting up. Exiting.`
+            );
+            try {
+              ws.close();
+            } catch {
+            }
+            meter.dispose();
+            return 0;
+          }
+          try {
+            await fs5.unlink(sockPath);
+          } catch {
+          }
+          try {
+            await bindOnce();
+            socketBindPath = sockPath;
+          } catch (err2) {
+            const e2 = err2;
+            log.warn(`Could not bind ingest socket at ${sockPath}: ${e2?.message ?? err2}`);
+          }
+        } else {
+          log.warn(`Could not bind ingest socket at ${sockPath}: ${e?.message ?? err}`);
         }
       }
-      log.info(`Ingest TCP server listening on 127.0.0.1:${boundIngestPort}.`);
+      if (socketBindPath) {
+        try {
+          await fs5.chmod(sockPath, 384);
+        } catch {
+        }
+        log.info(`Ingest socket listening at ${kleur6.gray(sockPath)}.`);
+      }
     }
-  } else {
-    const sockPath = socketPath();
+    log.info(`Watching. Threshold: ${kleur6.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);
+    log.info(
+      `Feed me lines on stdin like ${kleur6.cyan("tokens:1234")}, or let CC hooks pipe via the socket.`
+    );
+    async function tickHeartbeat() {
+      try {
+        const ack = await api.meterHeartbeat({
+          current: meter.total,
+          threshold: meter.currentThreshold
+        });
+        if (ack.threshold !== meter.currentThreshold) {
+          log.info(
+            `Threshold updated from settings: ${kleur6.bold(
+              meter.currentThreshold.toLocaleString()
+            )} \u2192 ${kleur6.bold(ack.threshold.toLocaleString())}`
+          );
+          meter.setThreshold(ack.threshold);
+          try {
+            await save({ ...cfg, thresholdTokens: ack.threshold });
+            cfg.thresholdTokens = ack.threshold;
+          } catch {
+          }
+        }
+      } catch {
+      }
+    }
     try {
-      await fs4.mkdir(configDir(), { recursive: true, mode: 448 });
+      const me = await api.me();
+      if (me.thresholdTokens !== meter.currentThreshold) {
+        log.info(
+          `Loaded threshold from your account: ${kleur6.bold(me.thresholdTokens.toLocaleString())}`
+        );
+        meter.setThreshold(me.thresholdTokens);
+        try {
+          await save({ ...cfg, thresholdTokens: me.thresholdTokens });
+          cfg.thresholdTokens = me.thresholdTokens;
+        } catch {
+        }
+      }
     } catch {
     }
-    const bindOnce = () => new Promise((resolve, reject) => {
-      const onError = (err) => {
-        ingestServer.removeListener("listening", onListen);
-        reject(err);
-      };
-      const onListen = () => {
-        ingestServer.removeListener("error", onError);
-        resolve();
-      };
-      ingestServer.once("error", onError);
-      ingestServer.once("listening", onListen);
-      ingestServer.listen(sockPath);
-    });
-    try {
-      await bindOnce();
-      socketBindPath = sockPath;
-    } catch (err) {
-      const e = err;
-      if (e?.code === "EADDRINUSE" || e?.code === "EEXIST") {
-        if (await probeUnixSocket(sockPath)) {
-          log.info(
-            `Another vibebreak watcher bound ${kleur6.gray(sockPath)} while we were starting up. Exiting.`
-          );
+    void tickHeartbeat();
+    const heartbeat = setInterval(() => {
+      void tickHeartbeat();
+    }, 3e3);
+    process.on("SIGINT", () => shutdown2(0));
+    process.on("SIGTERM", () => shutdown2(0));
+    return await new Promise((resolve) => {
+      rl.on("close", () => {
+        if (!exiting) {
+          log.info("Input stream closed. Exiting.");
+          try {
+            ingestServer.close();
+          } catch {
+          }
+          if (socketBindPath) {
+            try {
+              unlinkSync2(socketBindPath);
+            } catch {
+            }
+          }
           try {
             ws.close();
           } catch {
           }
           meter.dispose();
-          return 0;
+          restoreCursor();
+          releaseWatchLock();
         }
-        try {
-          await fs4.unlink(sockPath);
-        } catch {
-        }
-        try {
-          await bindOnce();
-          socketBindPath = sockPath;
-        } catch (err2) {
-          const e2 = err2;
-          log.warn(`Could not bind ingest socket at ${sockPath}: ${e2?.message ?? err2}`);
-        }
-      } else {
-        log.warn(`Could not bind ingest socket at ${sockPath}: ${e?.message ?? err}`);
-      }
-    }
-    if (socketBindPath) {
-      try {
-        await fs4.chmod(sockPath, 384);
-      } catch {
-      }
-      log.info(`Ingest socket listening at ${kleur6.gray(sockPath)}.`);
-    }
-  }
-  log.info(`Watching. Threshold: ${kleur6.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);
-  log.info(
-    `Feed me lines on stdin like ${kleur6.cyan("tokens:1234")}, or let CC hooks pipe via the socket.`
-  );
-  async function tickHeartbeat() {
-    try {
-      const ack = await api.meterHeartbeat({
-        current: meter.total,
-        threshold: meter.currentThreshold
+        resolve(0);
       });
-      if (ack.threshold !== meter.currentThreshold) {
-        log.info(
-          `Threshold updated from settings: ${kleur6.bold(
-            meter.currentThreshold.toLocaleString()
-          )} \u2192 ${kleur6.bold(ack.threshold.toLocaleString())}`
-        );
-        meter.setThreshold(ack.threshold);
-        try {
-          await save({ ...cfg, thresholdTokens: ack.threshold });
-          cfg.thresholdTokens = ack.threshold;
-        } catch {
-        }
-      }
-    } catch {
-    }
-  }
-  try {
-    const me = await api.me();
-    if (me.thresholdTokens !== meter.currentThreshold) {
-      log.info(
-        `Loaded threshold from your account: ${kleur6.bold(me.thresholdTokens.toLocaleString())}`
-      );
-      meter.setThreshold(me.thresholdTokens);
-      try {
-        await save({ ...cfg, thresholdTokens: me.thresholdTokens });
-        cfg.thresholdTokens = me.thresholdTokens;
-      } catch {
-      }
-    }
-  } catch {
-  }
-  void tickHeartbeat();
-  const heartbeat = setInterval(() => {
-    void tickHeartbeat();
-  }, 3e3);
-  function shutdown(code) {
-    if (exiting) return;
-    exiting = true;
-    log.info("Shutting down...");
-    try {
-      clearInterval(heartbeat);
-    } catch {
-    }
-    try {
-      rl.close();
-    } catch {
-    }
-    try {
-      ingestServer.close();
-    } catch {
-    }
-    if (socketBindPath) {
-      try {
-        unlinkSync(socketBindPath);
-      } catch {
-      }
-    }
-    try {
-      ws.close();
-    } catch {
-    }
-    if (activeLock) {
-      activeLock.release({ message: "Aborted by user." });
-      activeLock = null;
-    }
-    meter.dispose();
-    restoreCursor();
-    setTimeout(() => process.exit(code), 50);
-  }
-  process.on("SIGINT", () => shutdown(0));
-  process.on("SIGTERM", () => shutdown(0));
-  return await new Promise((resolve) => {
-    rl.on("close", () => {
-      if (!exiting) {
-        log.info("Input stream closed. Exiting.");
-        try {
-          ingestServer.close();
-        } catch {
-        }
-        if (socketBindPath) {
-          try {
-            unlinkSync(socketBindPath);
-          } catch {
-          }
-        }
-        try {
-          ws.close();
-        } catch {
-        }
-        meter.dispose();
-        restoreCursor();
-      }
-      resolve(0);
     });
-  });
+  } finally {
+    process.off("exit", releaseWatchLockOnExit);
+    await watchLock.release().catch(() => void 0);
+  }
 }
 
 // bin/vibebreak.ts
