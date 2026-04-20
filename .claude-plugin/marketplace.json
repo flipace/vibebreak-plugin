@@ -1,0 +1,18 @@
+{
+  "name": "vibebreak",
+  "owner": {
+    "name": "flipace",
+    "email": "neschkudla@gmail.com",
+    "url": "https://vibebreak.app"
+  },
+  "plugins": [
+    {
+      "name": "vibebreak",
+      "source": ".",
+      "version": "0.1.0",
+      "description": "Lock your Claude Code sessions every N tokens until you move. Phone counts reps and posts a BeReal-style snap to friends.",
+      "homepage": "https://vibebreak.app",
+      "keywords": ["fitness", "break", "posture", "streak", "bereal", "movement"]
+    }
+  ]
+}
