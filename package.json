@@ -1,6 +1,6 @@
 {
   "name": "vibebreak",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Lock your Claude Code sessions every N tokens until you move. Phone counts reps and posts a BeReal-style snap to friends.",
   "author": "flipace <neschkudla@gmail.com>",
   "license": "MIT",

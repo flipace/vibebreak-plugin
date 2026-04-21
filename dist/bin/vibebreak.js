@@ -1102,7 +1102,9 @@ function connectWs(baseUrl, deviceJwt) {
     if (reconnectTimer) return;
     const wait = backoff;
     backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
-    log.warn(`WS disconnected. Reconnecting in ${(wait / 1e3).toFixed(0)}s...`);
+    log.warn(
+      `Phone sync disconnected. Reconnecting in ${(wait / 1e3).toFixed(0)}s. Local token tracking continues.`
+    );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       open();
@@ -1122,7 +1124,7 @@ function connectWs(baseUrl, deviceJwt) {
     ws = socket;
     socket.on("open", () => {
       backoff = MIN_BACKOFF_MS;
-      log.ok(`WS connected to ${baseUrl}`);
+      log.info(`Phone sync transport connected to ${baseUrl}. Waiting for ready signal...`);
       emit("open");
     });
     socket.on("message", (data) => {
@@ -1168,7 +1170,7 @@ function connectWs(baseUrl, deviceJwt) {
     });
     socket.on("error", (err) => {
       const e = err instanceof Error ? err : new Error(String(err));
-      log.warn(`WS error: ${e.message}`);
+      log.warn(`Phone sync error: ${e.message}`);
       emit("error", e);
     });
     socket.on("close", () => {
@@ -1346,12 +1348,14 @@ async function runWatch(cfg, opts = {}) {
       log.err(`Could not initialize the local ingest secret: ${msg}`);
       return 1;
     }
+    log.ok("Watcher active. This process is now tracking VibeBreak on this machine.");
     const deviceJwt = cfg.deviceJwt;
     const api = new Api(cfg.apiBaseUrl, deviceJwt);
     const ws = connectWs(cfg.wsBaseUrl, deviceJwt);
     let activeLock = null;
     let activeGateId = null;
     let exiting = false;
+    let meterSyncOnline = false;
     const meter = new TokenMeter({
       threshold: cfg.thresholdTokens,
       onTrigger: () => {
@@ -1392,7 +1396,7 @@ async function runWatch(cfg, opts = {}) {
       meter.reset();
     }
     ws.on("hello", (deviceId) => {
-      log.info(`WS hello (deviceId=${deviceId}).`);
+      log.ok(`Phone sync online. Live unlocks are ready for device ${kleur6.gray(deviceId)}.`);
     });
     ws.on("unlock", (gateId) => {
       if (activeLock && (activeGateId === gateId || activeGateId === null)) {
@@ -1404,6 +1408,8 @@ async function runWatch(cfg, opts = {}) {
       } else {
         log.warn(`Got unlock for gate ${gateId} but no matching active lock; ignoring.`);
       }
+    });
+    ws.on("close", () => {
     });
     ws.on("error", () => {
     });
@@ -1476,7 +1482,9 @@ async function runWatch(cfg, opts = {}) {
             log.warn(`Could not persist ingestPort to config: ${msg}`);
           }
         }
-        log.info(`Ingest TCP server listening on 127.0.0.1:${boundIngestPort}.`);
+        log.ok(
+          `Local token ingest ready at ${kleur6.gray(`127.0.0.1:${boundIngestPort}`)}.`
+        );
       }
     } else {
       const sockPath = socketPath();
@@ -1534,12 +1542,18 @@ async function runWatch(cfg, opts = {}) {
           await fs5.chmod(sockPath, 384);
         } catch {
         }
-        log.info(`Ingest socket listening at ${kleur6.gray(sockPath)}.`);
+        log.ok(`Local token ingest ready at ${kleur6.gray(sockPath)}.`);
       }
     }
-    log.info(`Watching. Threshold: ${kleur6.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);
+    log.info(`Break gate armed at ${kleur6.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);
     log.info(
-      `Feed me lines on stdin like ${kleur6.cyan("tokens:1234")}, or let CC hooks pipe via the socket.`
+      `Claude Code hooks can feed token deltas automatically, or you can send ${kleur6.cyan(
+        "tokens:1234"
+      )} on stdin.`
+    );
+    log.info("Phone sync is starting up. You will see an explicit 'Phone sync online' once it is ready.");
+    log.info(
+      "Normal while idle: VibeBreak stays quiet until sync changes, a gate opens, or you stop the watcher."
     );
     async function tickHeartbeat() {
       try {
@@ -1547,6 +1561,10 @@ async function runWatch(cfg, opts = {}) {
           current: meter.total,
           threshold: meter.currentThreshold
         });
+        if (!meterSyncOnline) {
+          meterSyncOnline = true;
+          log.ok("Live meter sync online. Your phone can see the current token count.");
+        }
         if (ack.threshold !== meter.currentThreshold) {
           log.info(
             `Threshold updated from settings: ${kleur6.bold(
@@ -1561,6 +1579,10 @@ async function runWatch(cfg, opts = {}) {
           }
         }
       } catch {
+        if (meterSyncOnline) {
+          meterSyncOnline = false;
+          log.warn("Live meter sync lost. Local token counting still continues.");
+        }
       }
     }
     try {
@@ -1577,6 +1599,7 @@ async function runWatch(cfg, opts = {}) {
         }
       }
     } catch {
+      log.warn("Could not load account settings at startup. Using the local threshold for now.");
     }
     void tickHeartbeat();
     const heartbeat = setInterval(() => {

@@ -79,7 +79,10 @@ export function connectWs(baseUrl: string, deviceJwt: string): WsClient {
     if (reconnectTimer) return;
     const wait = backoff;
     backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
-    log.warn(`WS disconnected. Reconnecting in ${(wait / 1000).toFixed(0)}s...`);
+    log.warn(
+      `Phone sync disconnected. Reconnecting in ${(wait / 1000).toFixed(0)}s. ` +
+        `Local token tracking continues.`,
+    );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       open();
@@ -101,7 +104,7 @@ export function connectWs(baseUrl: string, deviceJwt: string): WsClient {
 
     socket.on("open", () => {
       backoff = MIN_BACKOFF_MS;
-      log.ok(`WS connected to ${baseUrl}`);
+      log.info(`Phone sync transport connected to ${baseUrl}. Waiting for ready signal...`);
       emit("open");
     });
 
@@ -152,7 +155,7 @@ export function connectWs(baseUrl: string, deviceJwt: string): WsClient {
     socket.on("error", (err) => {
       const e = err instanceof Error ? err : new Error(String(err));
       // Surface a short, useful message; the actual reconnect happens via 'close'.
-      log.warn(`WS error: ${e.message}`);
+      log.warn(`Phone sync error: ${e.message}`);
       emit("error", e);
     });
 

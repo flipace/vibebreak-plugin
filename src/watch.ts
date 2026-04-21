@@ -161,6 +161,8 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
       return 1;
     }
 
+    log.ok("Watcher active. This process is now tracking VibeBreak on this machine.");
+
     // Narrowed once at entry by the isPaired check above; async awaits below
     // reassign `cfg` so TS loses the narrowing. Re-assert here.
     const deviceJwt = cfg.deviceJwt as string;
@@ -170,6 +172,7 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
     let activeLock: LockHandle | null = null;
     let activeGateId: string | null = null;
     let exiting = false;
+    let meterSyncOnline = false;
 
     const meter = new TokenMeter({
       threshold: cfg.thresholdTokens,
@@ -221,7 +224,7 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
     }
 
     ws.on("hello", (deviceId) => {
-      log.info(`WS hello (deviceId=${deviceId}).`);
+      log.ok(`Phone sync online. Live unlocks are ready for device ${kleur.gray(deviceId)}.`);
     });
 
     ws.on("unlock", (gateId) => {
@@ -234,6 +237,10 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
       } else {
         log.warn(`Got unlock for gate ${gateId} but no matching active lock; ignoring.`);
       }
+    });
+
+    ws.on("close", () => {
+      // Reconnect messaging is handled in ws.ts.
     });
 
     ws.on("error", () => {
@@ -325,7 +332,9 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
             log.warn(`Could not persist ingestPort to config: ${msg}`);
           }
         }
-        log.info(`Ingest TCP server listening on 127.0.0.1:${boundIngestPort}.`);
+        log.ok(
+          `Local token ingest ready at ${kleur.gray(`127.0.0.1:${boundIngestPort}`)}.`,
+        );
       }
     } else {
       const sockPath = socketPath();
@@ -394,13 +403,19 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
         } catch {
           // ignore
         }
-        log.info(`Ingest socket listening at ${kleur.gray(sockPath)}.`);
+        log.ok(`Local token ingest ready at ${kleur.gray(sockPath)}.`);
       }
     }
 
-    log.info(`Watching. Threshold: ${kleur.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);
+    log.info(`Break gate armed at ${kleur.bold(cfg.thresholdTokens.toLocaleString())} tokens.`);
     log.info(
-      `Feed me lines on stdin like ${kleur.cyan("tokens:1234")}, or let CC hooks pipe via the socket.`,
+      `Claude Code hooks can feed token deltas automatically, or you can send ${kleur.cyan(
+        "tokens:1234",
+      )} on stdin.`,
+    );
+    log.info("Phone sync is starting up. You will see an explicit 'Phone sync online' once it is ready.");
+    log.info(
+      "Normal while idle: VibeBreak stays quiet until sync changes, a gate opens, or you stop the watcher.",
     );
 
     // Heartbeat the current meter to the API so the mobile app can render
@@ -414,6 +429,10 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
           current: meter.total,
           threshold: meter.currentThreshold,
         });
+        if (!meterSyncOnline) {
+          meterSyncOnline = true;
+          log.ok("Live meter sync online. Your phone can see the current token count.");
+        }
         if (ack.threshold !== meter.currentThreshold) {
           log.info(
             `Threshold updated from settings: ${kleur.bold(
@@ -431,7 +450,10 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
           }
         }
       } catch {
-        // Never block the watch loop on a heartbeat failure.
+        if (meterSyncOnline) {
+          meterSyncOnline = false;
+          log.warn("Live meter sync lost. Local token counting still continues.");
+        }
       }
     }
 
@@ -452,7 +474,7 @@ export async function runWatch(cfg: PluginConfig, opts: WatchOptions = {}): Prom
         }
       }
     } catch {
-      // Account fetch failed - proceed with the locally configured threshold.
+      log.warn("Could not load account settings at startup. Using the local threshold for now.");
     }
 
     void tickHeartbeat();
